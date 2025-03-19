@@ -16,7 +16,7 @@ st.set_page_config(
 )
 
 # API Configuration
-API_URL = os.getenv("API_URL", "http://0.0.0.0:8000")
+API_URL = os.getenv("API_URL", "https://your-backend-service-name.onrender.com")
 API_USERNAME = os.getenv("API_USERNAME", "admin")
 API_PASSWORD = os.getenv("API_PASSWORD", "password123")
 
@@ -187,4 +187,4 @@ with st.expander("Entity Type Descriptions"):
 
 # Footer
 st.markdown("---")
-st.markdown("NER Model powered by SpaCy and served via FastAPI")
+st.markdown("NER Model powered by BERT and served via FastAPI")
