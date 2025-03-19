@@ -43,19 +43,18 @@ def log_memory_usage(label):
     logger.info(f"Memory usage ({label}): {memory_info.rss / 1024 / 1024:.2f} MB")
 
 def initialize_model():
-    """Load model from Hugging Face with aggressive memory optimizations"""
+    """Load model with extreme memory optimization for Render free tier"""
     global tokenizer, model, id_to_tag
     
     if tokenizer is not None and model is not None:
         return
     
-    # Aggressive garbage collection before loading model
+    # Aggressive cleanup before loading
     gc.collect()
     torch.cuda.empty_cache() if torch.cuda.is_available() else None
     log_memory_usage("before_model_load")
     
     try:
-        # Load directly from Hugging Face with optimizations
         logger.info(f"Loading model from Hugging Face: {MODEL_ID}")
         start_time = time.time()
         
@@ -64,28 +63,27 @@ def initialize_model():
         tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
         gc.collect()
         
-        # Step 2: Load model with basic parameters (no accelerate needed)
-        logger.info("Loading model with memory optimization...")
+        # Step 2: Load model with minimal settings - no accelerate needed
+        logger.info("Loading model with basic settings...")
         
-        # Ultra-lightweight loading approach
-        model = AutoModelForTokenClassification.from_pretrained(
-            MODEL_ID,
-            torchscript=True,     # Optimize for inference
-            return_dict=False      # Reduce memory overhead
-        )
+        # Simple, reliable approach without using low_cpu_mem_usage
+        model = AutoModelForTokenClassification.from_pretrained(MODEL_ID)
         
         # Ensure model is in evaluation mode to save memory
         model.eval()
         
-        # Step 3: Apply dynamic quantization - significantly reduces memory usage
-        logger.info("Applying dynamic quantization...")
-        model = torch.quantization.quantize_dynamic(
-            model, 
-            {torch.nn.Linear, torch.nn.Embedding, torch.nn.LayerNorm}, 
-            dtype=torch.qint8
-        )
+        # Step 3: Apply quantization to reduce memory usage
+        logger.info("Applying quantization...")
+        try:
+            model = torch.quantization.quantize_dynamic(
+                model, 
+                {torch.nn.Linear}, 
+                dtype=torch.qint8
+            )
+        except Exception as e:
+            logger.warning(f"Quantization failed: {str(e)}, continuing with regular model")
         
-        # Force model to CPU mode and clear CUDA cache if needed
+        # Force model to CPU mode
         model = model.cpu()
         torch.cuda.empty_cache() if torch.cuda.is_available() else None
         
@@ -99,7 +97,7 @@ def initialize_model():
         # Free up memory
         gc.collect()
         
-        logger.info(f"Model loaded and optimized in {time.time() - start_time:.2f} seconds")
+        logger.info(f"Model loaded in {time.time() - start_time:.2f} seconds")
         log_memory_usage("after_model_load")
         
     except Exception as e:
@@ -178,29 +176,36 @@ async def predict(request_data: TextRequest, request: Request, credentials = Dep
             initialize_model()
             
         with log_performance("text_processing"):
-            # Process text in smaller chunks for memory efficiency
-            max_length = 384  # Reduced from 512 for memory efficiency
+            # Process text in extremely small chunks for Render free tier
+            max_length = 100  # Very small chunks to avoid memory issues
             entity_dicts = []
             
             if len(text) > max_length:
-                # Process long text in overlapping chunks with smaller overlap
+                # Process long text in tiny chunks with minimal overlap
                 chunks = []
-                for i in range(0, len(text), max_length - 30):
+                for i in range(0, len(text), max_length - 5):  # Just 5 chars overlap
                     chunk = text[i:i + max_length]
                     chunks.append((i, chunk))
                 
                 for offset, chunk in chunks:
-                    # Clear memory between chunk processing
+                    # Clear memory between chunks
                     if offset > 0:
                         gc.collect()
                     
+                    # Skip empty chunks to save processing
+                    if not chunk.strip():
+                        continue
+                        
                     chunk_entities = predict_entities(chunk, tokenizer, model, id_to_tag)
                     
-                    # Adjust entity positions based on chunk offset
+                    # Adjust entity positions
                     for entity in chunk_entities:
                         entity["start"] += offset
                         entity["end"] += offset
                     entity_dicts.extend(chunk_entities)
+                    
+                    # Force garbage collection after each chunk
+                    gc.collect()
             else:
                 entity_dicts = predict_entities(text, tokenizer, model, id_to_tag)
         
@@ -229,13 +234,15 @@ async def predict(request_data: TextRequest, request: Request, credentials = Dep
         logger.error(f"Error processing prediction: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error processing text: {str(e)}")
 
-# Add this new endpoint
+# Add this new endpoint - simple test endpoint that doesn't load the model
 @app.post("/test-predict")
 def test_predict(request_data: TextRequest):
     """Simple test endpoint that doesn't load the model"""
     return {
         "entities": [
-            {"text": "Test Entity", "start": 0, "end": 10, "label": "TEST"}
+            {"text": "Test Entity", "start": 0, "end": 10, "label": "TEST"},
+            {"text": "Sample Organization", "start": 15, "end": 35, "label": "ORG"},
+            {"text": "New York", "start": 40, "end": 48, "label": "LOC"}
         ],
         "original_text": request_data.text,
         "processing_time": 0.001

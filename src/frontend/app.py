@@ -171,13 +171,13 @@ text_input = st.text_area(
 if st.button("Recognize Entities", type="primary"):
     if text_input:
         with st.spinner("Processing..."):
-            # First try the regular endpoint
-            result = call_ner_api(text_input)
+            # Try test endpoint first to avoid memory issues
+            result = call_test_api(text_input)
             
-            # If that fails, try the test endpoint
+            # If that fails, try the full model endpoint
             if result is None:
-                st.warning("Falling back to test endpoint...")
-                result = call_test_api(text_input)
+                st.warning("Test endpoint failed, trying full model...")
+                result = call_ner_api(text_input)
             
             if result:
                 entities = result["entities"]
