@@ -12,6 +12,8 @@ import time
 from pathlib import Path
 import gc
 import torch.quantization
+import psutil
+import traceback
 
 # Import functions from run_inference.py
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
@@ -36,16 +38,22 @@ tokenizer = None
 model = None
 id_to_tag = None
 
+def log_memory_usage(label):
+    process = psutil.Process(os.getpid())
+    memory_info = process.memory_info()
+    logger.info(f"Memory usage ({label}): {memory_info.rss / 1024 / 1024:.2f} MB")
+
 def initialize_model():
-    """Load model with memory optimizations"""
+    """Load model with aggressive memory optimizations"""
     global tokenizer, model, id_to_tag
     
     if tokenizer is not None and model is not None:
         return
     
-    # Force garbage collection before loading model
+    # Aggressive garbage collection before loading model
     gc.collect()
     torch.cuda.empty_cache() if torch.cuda.is_available() else None
+    log_memory_usage("before_model_load")
     
     # Create cache directory if it doesn't exist
     model_dir = os.path.join(MODEL_CACHE_DIR, MODEL_ID.replace("/", "_"))
@@ -55,77 +63,102 @@ def initialize_model():
     model_exists = os.path.exists(os.path.join(model_dir, "pytorch_model.bin"))
     tokenizer_exists = os.path.exists(os.path.join(model_dir, "vocab.txt"))
     
-    if model_exists and tokenizer_exists:
-        logger.info(f"Loading model from local cache: {model_dir}")
-        start_time = time.time()
-        try:
-            # Use load_model from run_inference.py
-            tokenizer, model, id_to_tag = load_model(model_dir)
+    try:
+        # Load with more aggressive optimization
+        if model_exists and tokenizer_exists:
+            logger.info(f"Loading model from local cache: {model_dir}")
+            start_time = time.time()
             
-            # Verify components were actually loaded
-            if tokenizer is None or model is None or id_to_tag is None:
-                raise ValueError("One or more model components failed to load")
+            # Load in parts to reduce memory pressure
+            logger.info("Loading tokenizer...")
+            tokenizer = load_model_component(model_dir, "tokenizer")
+            gc.collect()
+            
+            logger.info("Loading model...")
+            model = load_model_component(model_dir, "model")
+            gc.collect()
+            
+            # Load ID to tag mapping
+            tag_file = os.path.join(model_dir, "tag_mappings.json")
+            if os.path.exists(tag_file):
+                with open(tag_file, "r") as f:
+                    mappings = json.load(f)
+                    id_to_tag = mappings.get("id_to_tag", {})
+                    # Convert string keys to integers
+                    id_to_tag = {int(k): v for k, v in id_to_tag.items()}
+            else:
+                raise ValueError("Tag mappings not found in cache")
                 
             logger.info(f"Model loaded from cache in {time.time() - start_time:.2f} seconds")
-            return
-        except Exception as e:
-            logger.warning(f"Failed to load from cache, will download: {str(e)}")
-    
-    # Download from Hugging Face if not in cache
-    logger.info(f"Downloading model from Hugging Face: {MODEL_ID}")
-    start_time = time.time()
-    
-    try:
-        # Try with standard BertTokenizer first if Fast version fails
-        from transformers import BertTokenizer, BertTokenizerFast, BertForTokenClassification
-        
-        # Try loading with fast tokenizer first
-        try:
-            tokenizer = BertTokenizerFast.from_pretrained(MODEL_ID)
-        except Exception as e:
-            logger.warning(f"Fast tokenizer failed, falling back to standard tokenizer: {str(e)}")
-            tokenizer = BertTokenizer.from_pretrained(MODEL_ID)
-            
-        model = BertForTokenClassification.from_pretrained(MODEL_ID)
-        
-        # Save to cache
-        logger.info(f"Saving model to cache: {model_dir}")
-        tokenizer.save_pretrained(model_dir)
-        model.save_pretrained(model_dir)
-        
-        # Create ID to tag mapping
-        if hasattr(model.config, "id2label"):
-            id_to_tag = model.config.id2label
-            # Save mappings to cache
-            with open(os.path.join(model_dir, "tag_mappings.json"), "w") as f:
-                json.dump({"id_to_tag": id_to_tag}, f)
         else:
-            num_labels = model.config.num_labels
-            id_to_tag = {i: f"TAG_{i}" for i in range(num_labels)}
+            # Download from Hugging Face
+            logger.info(f"Downloading model from Hugging Face: {MODEL_ID}")
+            start_time = time.time()
             
+            # Load in sequence to reduce peak memory usage
+            logger.info("Loading tokenizer...")
+            from transformers import BertTokenizer
+            tokenizer = BertTokenizer.from_pretrained(MODEL_ID)
+            tokenizer.save_pretrained(model_dir)
+            gc.collect()
+            
+            logger.info("Loading model...")
+            from transformers import BertForTokenClassification
+            model = BertForTokenClassification.from_pretrained(MODEL_ID, 
+                                                            torchscript=True,
+                                                            return_dict=False)
+            gc.collect()
+            
+            # Save model before optimizing to save memory during save
+            model.save_pretrained(model_dir)
+            
+            # Create ID to tag mapping
+            if hasattr(model.config, "id2label"):
+                id_to_tag = model.config.id2label
+                # Save mappings to cache
+                with open(os.path.join(model_dir, "tag_mappings.json"), "w") as f:
+                    json.dump({"id_to_tag": id_to_tag}, f)
+            else:
+                num_labels = model.config.num_labels
+                id_to_tag = {i: f"TAG_{i}" for i in range(num_labels)}
+        
+        # Optimize model regardless of load path
+        logger.info("Optimizing model for inference...")
         model.eval()  # Set model to evaluation mode
         
-        # Add memory optimizations after model is loaded
-        model.config.torchscript = True
+        # Apply quantization for reduced memory usage
+        logger.info("Applying quantization...")
         model = torch.quantization.quantize_dynamic(
-            model, {torch.nn.Linear}, dtype=torch.qint8
+            model, {torch.nn.Linear, torch.nn.Embedding}, dtype=torch.qint8
         )
         
-        # Move model to CPU explicitly to control memory
+        # Force model to CPU mode
         model = model.cpu()
         
-        # Additional memory cleanup
+        # Free up as much memory as possible
         gc.collect()
+        torch.cuda.empty_cache() if torch.cuda.is_available() else None
         
-        # Verify components were successfully loaded
-        if tokenizer is None or model is None or id_to_tag is None:
-            raise ValueError("One or more model components failed to initialize")
-            
-        logger.info(f"Model downloaded and cached in {time.time() - start_time:.2f} seconds")
-    
+        log_memory_usage("after_model_load")
+        
     except Exception as e:
-        logger.error(f"Failed to download model: {str(e)}", exc_info=True)
+        logger.error(f"Model initialization error: {str(e)}\n{traceback.format_exc()}")
         raise RuntimeError(f"Could not initialize model: {str(e)}")
+
+def load_model_component(model_dir, component_type):
+    """Load model component with minimal memory footprint"""
+    try:
+        if component_type == "tokenizer":
+            from transformers import BertTokenizer
+            return BertTokenizer.from_pretrained(model_dir)
+        elif component_type == "model":
+            from transformers import BertForTokenClassification
+            return BertForTokenClassification.from_pretrained(model_dir, 
+                                                           torchscript=True,
+                                                           return_dict=False)
+    except Exception as e:
+        logger.error(f"Failed to load {component_type}: {str(e)}")
+        raise
 
 security = HTTPBasic()
 
@@ -192,25 +225,36 @@ async def predict(request_data: TextRequest, request: Request, credentials = Dep
     start_time = time.time()
     
     try:
+        log_memory_usage("before_prediction")
+        
         # Ensure model is loaded
         if model is None or tokenizer is None or id_to_tag is None:
             initialize_model()
             
-        # Double-check that model loaded successfully
-        if model is None or tokenizer is None or id_to_tag is None:
-            raise RuntimeError("Failed to initialize model components")
-            
         with log_performance("text_tokenization"):
-            # Use predict_entities from run_inference.py
-            entity_dicts = predict_entities(text, tokenizer, model, id_to_tag)
+            # Process text in smaller chunks if very long
+            max_length = 512
+            entity_dicts = []
             
-            # Log the found entities for debugging
-            logger.info(f"Found {len(entity_dicts)} entities in text of length {len(text)}")
-            if entity_dicts:
-                for entity in entity_dicts:
-                    logger.info(f"Entity: {entity['text']} - {entity['label']}")
-        
-        log_prediction(len(text), entity_dicts, "bert-base")
+            if len(text) > max_length:
+                # Process long text in overlapping chunks
+                chunks = []
+                for i in range(0, len(text), max_length - 50):
+                    chunk = text[i:i + max_length]
+                    chunks.append((i, chunk))
+                
+                for offset, chunk in chunks:
+                    chunk_entities = predict_entities(chunk, tokenizer, model, id_to_tag)
+                    # Adjust entity positions based on chunk offset
+                    for entity in chunk_entities:
+                        entity["start"] += offset
+                        entity["end"] += offset
+                    entity_dicts.extend(chunk_entities)
+                    
+                    # Clean up after each chunk
+                    gc.collect()
+            else:
+                entity_dicts = predict_entities(text, tokenizer, model, id_to_tag)
         
         # Convert to Entity objects
         entities = [
@@ -223,6 +267,10 @@ async def predict(request_data: TextRequest, request: Request, credentials = Dep
         ]
         
         processing_time = time.time() - start_time
+        log_memory_usage("after_prediction")
+        
+        # Force garbage collection again
+        gc.collect()
         
         return PredictionResponse(
             entities=entities,
