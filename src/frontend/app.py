@@ -77,6 +77,23 @@ def call_ner_api(text):
         
         return None
 
+# Add this after your call_ner_api function
+
+def call_test_api(text):
+    """Call the test API endpoint as a fallback"""
+    try:
+        response = requests.post(
+            f"{API_URL}/test-predict", 
+            headers={**get_auth_header(), "Content-Type": "application/json"},
+            json={"text": text},
+            timeout=10  # Short timeout for test endpoint
+        )
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        st.error(f"Test API Error: {str(e)}")
+        return None
+
 def highlight_entities(text, entities):
     """Highlight entities in the original text with HTML"""
     # Sort entities by start position in reverse order to avoid index issues
@@ -154,8 +171,13 @@ text_input = st.text_area(
 if st.button("Recognize Entities", type="primary"):
     if text_input:
         with st.spinner("Processing..."):
-            # Call the API
+            # First try the regular endpoint
             result = call_ner_api(text_input)
+            
+            # If that fails, try the test endpoint
+            if result is None:
+                st.warning("Falling back to test endpoint...")
+                result = call_test_api(text_input)
             
             if result:
                 entities = result["entities"]

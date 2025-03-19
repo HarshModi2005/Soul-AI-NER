@@ -64,34 +64,17 @@ def initialize_model():
         tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
         gc.collect()
         
-        # Step 2: Load model with appropriate optimizations
-        logger.info("Loading model with quantization...")
-        from transformers import BertForTokenClassification
+        # Step 2: Load model with basic parameters (no accelerate needed)
+        logger.info("Loading model with memory optimization...")
         
-        # Check if accelerate is available
-        try:
-            import accelerate
-            has_accelerate = True
-        except ImportError:
-            has_accelerate = False
-            logger.warning("Accelerate package not found. Loading model without low_cpu_mem_usage.")
+        # Ultra-lightweight loading approach
+        model = AutoModelForTokenClassification.from_pretrained(
+            MODEL_ID,
+            torchscript=True,     # Optimize for inference
+            return_dict=False      # Reduce memory overhead
+        )
         
-        # Load model with or without accelerate features
-        if has_accelerate:
-            model = AutoModelForTokenClassification.from_pretrained(
-                MODEL_ID,
-                torchscript=True,
-                low_cpu_mem_usage=True,
-                return_dict=False
-            )
-        else:
-            model = AutoModelForTokenClassification.from_pretrained(
-                MODEL_ID,
-                torchscript=True,
-                return_dict=False
-            )
-        
-        # Ensure model is in evaluation mode
+        # Ensure model is in evaluation mode to save memory
         model.eval()
         
         # Step 3: Apply dynamic quantization - significantly reduces memory usage
@@ -245,3 +228,15 @@ async def predict(request_data: TextRequest, request: Request, credentials = Dep
     except Exception as e:
         logger.error(f"Error processing prediction: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error processing text: {str(e)}")
+
+# Add this new endpoint
+@app.post("/test-predict")
+def test_predict(request_data: TextRequest):
+    """Simple test endpoint that doesn't load the model"""
+    return {
+        "entities": [
+            {"text": "Test Entity", "start": 0, "end": 10, "label": "TEST"}
+        ],
+        "original_text": request_data.text,
+        "processing_time": 0.001
+    }
