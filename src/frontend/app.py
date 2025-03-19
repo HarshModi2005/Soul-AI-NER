@@ -8,6 +8,18 @@ from collections import Counter
 import plotly.express as px
 import os
 
+# Add this function after the imports
+def check_api_status():
+    """Check if the API is accessible and responding"""
+    try:
+        response = requests.get(f"{API_URL}/health")
+        if response.status_code == 200:
+            return True, response.json()
+        else:
+            return False, f"API returned status code {response.status_code}: {response.text}"
+    except requests.exceptions.RequestException as e:
+        return False, f"Connection error: {str(e)}"
+
 # Set page configuration
 st.set_page_config(
     page_title="Named Entity Recognition",
@@ -27,15 +39,42 @@ def get_auth_header():
 def call_ner_api(text):
     """Call the NER API and return the results"""
     try:
+        # Log request details for debugging
+        st.session_state["last_request"] = {
+            "url": f"{API_URL}/predict",
+            "headers": {"Content-Type": "application/json"},
+            "payload": {"text": text}
+        }
+        
+        # Make request with timeout and proper error handling
         response = requests.post(
             f"{API_URL}/predict", 
             headers={**get_auth_header(), "Content-Type": "application/json"},
-            json={"text": text}
+            json={"text": text},
+            timeout=60  # Set a reasonable timeout
         )
+        
+        # Log response details
+        st.session_state["last_response"] = {
+            "status_code": response.status_code,
+            "headers": dict(response.headers),
+            "content": response.text[:500] + "..." if len(response.text) > 500 else response.text
+        }
+        
         response.raise_for_status()
         return response.json()
     except requests.exceptions.RequestException as e:
         st.error(f"API Error: {str(e)}")
+        
+        # Add debug information in an expander
+        with st.expander("Debug Information"):
+            if "last_request" in st.session_state:
+                st.subheader("Last Request")
+                st.json(st.session_state["last_request"])
+            if "last_response" in st.session_state:
+                st.subheader("Last Response")
+                st.json(st.session_state["last_response"])
+        
         return None
 
 def highlight_entities(text, entities):
@@ -90,6 +129,18 @@ def highlight_entities(text, entities):
 # Title and description
 st.title("Named Entity Recognition")
 st.markdown("Extract entities such as people, organizations, locations, and more from your text.")
+
+# Add this code below the title section
+# Check API connectivity
+with st.sidebar:
+    st.header("API Status")
+    if st.button("Check API Connection"):
+        status, info = check_api_status()
+        if status:
+            st.success("✅ API is online")
+            st.json(info)
+        else:
+            st.error(f"❌ API unreachable: {info}")
 
 # Text input area
 text_input = st.text_area(
