@@ -16,7 +16,7 @@ st.set_page_config(
 )
 
 # API Configuration
-API_URL = os.getenv("API_URL", "https://your-backend-service-name.onrender.com")
+API_URL = os.getenv("API_URL", "https://soul-ai-ner-backend.onrender.com")
 API_USERNAME = os.getenv("API_USERNAME", "admin")
 API_PASSWORD = os.getenv("API_PASSWORD", "password123")
 
