@@ -64,16 +64,32 @@ def initialize_model():
         tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
         gc.collect()
         
-        # Step 2: Load model with 8-bit quantization
+        # Step 2: Load model with appropriate optimizations
         logger.info("Loading model with quantization...")
         from transformers import BertForTokenClassification
-        # Load with 8-bit quantization for memory efficiency
-        model = AutoModelForTokenClassification.from_pretrained(
-            MODEL_ID,
-            torchscript=True,
-            low_cpu_mem_usage=True,
-            return_dict=False
-        )
+        
+        # Check if accelerate is available
+        try:
+            import accelerate
+            has_accelerate = True
+        except ImportError:
+            has_accelerate = False
+            logger.warning("Accelerate package not found. Loading model without low_cpu_mem_usage.")
+        
+        # Load model with or without accelerate features
+        if has_accelerate:
+            model = AutoModelForTokenClassification.from_pretrained(
+                MODEL_ID,
+                torchscript=True,
+                low_cpu_mem_usage=True,
+                return_dict=False
+            )
+        else:
+            model = AutoModelForTokenClassification.from_pretrained(
+                MODEL_ID,
+                torchscript=True,
+                return_dict=False
+            )
         
         # Ensure model is in evaluation mode
         model.eval()
