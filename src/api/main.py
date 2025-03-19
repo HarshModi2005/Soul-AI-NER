@@ -10,6 +10,8 @@ from typing import List, Dict, Optional
 from src.api.logging_config import logger, log_request, log_performance, log_prediction
 import time
 from pathlib import Path
+import gc
+import torch.quantization
 
 # Import functions from run_inference.py
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
@@ -35,11 +37,15 @@ model = None
 id_to_tag = None
 
 def initialize_model():
-    """Load model from local cache or download from Hugging Face if not available"""
+    """Load model with memory optimizations"""
     global tokenizer, model, id_to_tag
     
     if tokenizer is not None and model is not None:
         return
+    
+    # Force garbage collection before loading model
+    gc.collect()
+    torch.cuda.empty_cache() if torch.cuda.is_available() else None
     
     # Create cache directory if it doesn't exist
     model_dir = os.path.join(MODEL_CACHE_DIR, MODEL_ID.replace("/", "_"))
@@ -98,6 +104,18 @@ def initialize_model():
             id_to_tag = {i: f"TAG_{i}" for i in range(num_labels)}
             
         model.eval()  # Set model to evaluation mode
+        
+        # Add memory optimizations after model is loaded
+        model.config.torchscript = True
+        model = torch.quantization.quantize_dynamic(
+            model, {torch.nn.Linear}, dtype=torch.qint8
+        )
+        
+        # Move model to CPU explicitly to control memory
+        model = model.cpu()
+        
+        # Additional memory cleanup
+        gc.collect()
         
         # Verify components were successfully loaded
         if tokenizer is None or model is None or id_to_tag is None:
